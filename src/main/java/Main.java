@@ -13,6 +13,8 @@ public class Main {
        serverSocket = new ServerSocket(port);
        serverSocket.setReuseAddress(true);
        clientSocket = serverSocket.accept();
+       byte[] correlationId = new byte[] {0,0,0,0,0,0,0,7};
+       clientSocket.getOutputStream().write(correlationId);
      } catch (IOException e) {
        System.out.println("IOException: " + e.getMessage());
      } finally {
