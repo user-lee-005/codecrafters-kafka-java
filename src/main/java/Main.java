@@ -1,14 +1,14 @@
-import dto.KafkaRequest;
 import dto.KafkaResponse;
+import handlers.ClientHandler;
 import processors.RequestProcessor;
 import processors.ResponseProcessor;
 
-import java.io.BufferedInputStream;
-import java.io.EOFException;
 import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class Main {
   static final List<KafkaResponse.ApiVersionDTO> supportedApis = List.of(
@@ -23,29 +23,15 @@ public class Main {
      RequestProcessor requestProcessor = new RequestProcessor();
      ResponseProcessor responseProcessor = new ResponseProcessor(supportedApis);
      int port = 9092;
-     try {
+     try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()){
        serverSocket = new ServerSocket(port);
        serverSocket.setReuseAddress(true);
-       clientSocket = serverSocket.accept();
-       BufferedInputStream inputStream = new BufferedInputStream(clientSocket.getInputStream());
-       while(true)
-       {
-           KafkaRequest kafkaRequest = requestProcessor.processRequest(inputStream);
-           byte[] res = responseProcessor.generateResponse(kafkaRequest);
-           responseProcessor.writeToOutputStream(clientSocket, res);
+       while (true) {
+           clientSocket = serverSocket.accept();
+           executor.submit(new ClientHandler(clientSocket, requestProcessor, responseProcessor));
        }
-     } catch (EOFException e) {
-       System.out.println("Client Disconnected.");
      } catch (IOException e) {
        System.out.println("IOException: " + e.getMessage());
-     } finally {
-       try {
-         if (clientSocket != null) {
-           clientSocket.close();
-         }
-       } catch (IOException e) {
-         System.out.println("IOException: " + e.getMessage());
-       }
      }
   }
 }

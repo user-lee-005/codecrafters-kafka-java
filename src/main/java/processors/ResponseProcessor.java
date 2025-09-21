@@ -4,6 +4,7 @@ import dto.KafkaRequest;
 import dto.KafkaResponse;
 
 import java.io.IOException;
+import java.io.OutputStream;
 import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
@@ -70,7 +71,10 @@ public class ResponseProcessor {
     }
 
     public void writeToOutputStream(Socket clientSocket, byte[] res) throws IOException {
-        clientSocket.getOutputStream().write(res);
+        OutputStream outputStream = clientSocket.getOutputStream();
+        outputStream.write(res);
+        System.out.println(">>>>> Writing Outputc");
+        outputStream.flush();
     }
 
     private void writeApiVersionsArray(ByteBuffer buf, short reqApiVersion) {
