@@ -13,4 +13,6 @@ public class Constants {
 
 
     public static final short unsupportedVersionErrorCode = 35;
+    public static final short UNKNOWN_TOPIC_OR_PARTITION_ERROR_CODE = 3;
+
 }

@@ -6,6 +6,16 @@ public class KafkaRequest {
     private short apiKey;
     private short apiVersion;
     private String clientId;
+    private KafkaRequestBody body;
+
+    public KafkaRequest(int messageSize, int correlationId, short apiKey, short apiVersion, String clientId, KafkaRequestBody body) {
+        this.messageSize = messageSize;
+        this.correlationId = correlationId;
+        this.apiKey = apiKey;
+        this.apiVersion = apiVersion;
+        this.clientId = clientId;
+        this.body = body;
+    }
 
     public KafkaRequest(int messageSize, int correlationId, short apiKey, short apiVersion, String clientId) {
         this.messageSize = messageSize;
@@ -39,6 +49,26 @@ public class KafkaRequest {
         this.apiKey = apiKey;
     }
 
+    @Override
+    public String toString() {
+        if(body != null) return "KafkaRequest{" +
+                "messageSize=" + messageSize +
+                ", correlationId=" + correlationId +
+                ", apiKey=" + apiKey +
+                ", apiVersion=" + apiVersion +
+                ", clientId='" + clientId + '\'' +
+                ", Kafka Request Body{" +
+                body.toString() +
+                "}}";
+        return "KafkaRequest{" +
+                "messageSize=" + messageSize +
+                ", correlationId=" + correlationId +
+                ", apiKey=" + apiKey +
+                ", apiVersion=" + apiVersion +
+                ", clientId='" + clientId + '\'' +
+                "}";
+    }
+
     public short getApiVersion() {
         return apiVersion;
     }
@@ -53,5 +83,13 @@ public class KafkaRequest {
 
     public void setClientId(String clientId) {
         this.clientId = clientId;
+    }
+
+    public KafkaRequestBody getBody() {
+        return body;
+    }
+
+    public void setBody(KafkaRequestBody body) {
+        this.body = body;
     }
 }

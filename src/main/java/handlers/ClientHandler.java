@@ -9,6 +9,7 @@ import java.io.DataInputStream;
 import java.io.EOFException;
 import java.io.IOException;
 import java.net.Socket;
+import java.text.MessageFormat;
 
 public class ClientHandler implements Runnable {
     private final Socket clientSocket;
@@ -25,9 +26,10 @@ public class ClientHandler implements Runnable {
     public void run() {
         long threadId = Thread.currentThread().threadId();
         try(BufferedInputStream inputStream = new BufferedInputStream(clientSocket.getInputStream())) {
-            while(true) {
+            while(!clientSocket.isClosed()) {
                 DataInputStream dataInputStream = new DataInputStream(new BufferedInputStream(inputStream));
                 KafkaRequest kafkaRequest = requestProcessor.processRequest(dataInputStream);
+                System.out.println(MessageFormat.format(">>> Kafka Message {0}", kafkaRequest.toString()));
                 System.out.println("[Thread " + threadId + "] Successfully processed request. Corr ID: " + kafkaRequest.getCorrelationId());
                 byte[] res = responseProcessor.generateResponse(kafkaRequest);
                 responseProcessor.writeToOutputStream(clientSocket, res);
@@ -37,8 +39,8 @@ public class ClientHandler implements Runnable {
         } catch (IOException e) {
             System.out.println("Client " + clientSocket.getInetAddress() + " disconnected.");
         } catch (Exception e) {
-            System.err.println("[Thread " + Thread.currentThread().getId() + "] A critical error occurred, crashing handler!");
-            e.printStackTrace(System.err); // This will print the full error stack trace.
+            System.err.println(MessageFormat.format("[Thread {0}] A critical error occurred, crashing handler!", Thread.currentThread().getId()));
+            e.printStackTrace(System.err);
         } finally {
             try {
                 if (clientSocket != null) {

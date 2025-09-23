@@ -8,7 +8,10 @@ import java.io.OutputStream;
 import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.text.MessageFormat;
 import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
 
 import static utils.Constants.*;
 import static utils.Constants.unsupportedVersionErrorCode;
@@ -16,40 +19,106 @@ import static utils.Constants.unsupportedVersionErrorCode;
 public class ResponseProcessor {
     private final List<KafkaResponse.ApiVersionDTO> supportedApis;
 
+    // A constant for the "unknown topic or partition" error code in Kafka.
+    private static final short UNKNOWN_TOPIC_OR_PARTITION_ERROR_CODE = 3;
+
     public ResponseProcessor(List<KafkaResponse.ApiVersionDTO> supportedApis) {
         this.supportedApis = supportedApis;
     }
 
     public byte[] generateResponse(KafkaRequest kafkaRequest) {
+        return switch (kafkaRequest.getApiKey()) {
+            case 18 -> getApiVersionResponse(kafkaRequest);
+            case 75 -> getDescribeTopicPartitionsResponse(kafkaRequest);
+            default ->
+                    throw new UnsupportedOperationException("API Key " + kafkaRequest.getApiKey() + " not implemented yet");
+        };
+    }
+
+    /**
+     * Generates a response for a DescribeTopicPartitions request (ApiKey 75).
+     * This implementation simulates the scenario where the requested topic is not found.
+     * Based on test logs, it must always return a response in the "flexible" format,
+     * regardless of the request's API version. Includes detailed logging for each field.
+     *
+     * @param kafkaRequest The request from the client.
+     * @return A byte array representing the response.
+     */
+    private byte[] getDescribeTopicPartitionsResponse(KafkaRequest kafkaRequest) {
+        String unknownTopicName = kafkaRequest.getBody().getTopics().getFirst();
+        byte[] nullTopicId = new byte[16]; // A null UUID is 16 zero bytes.
+
+        final short FLEXIBLE_VERSION_FLAG = 3;
+        int remainingSize = getDescribeTopicPartitionsResponseSize(FLEXIBLE_VERSION_FLAG, unknownTopicName);
+        ByteBuffer buf = ByteBuffer.allocate(messageSize + remainingSize);
+
+        System.out.println("\n--- Building DescribeTopicPartitions Response ---");
+
+        // 1. Write the total size of the message (excluding this field itself).
+        logWrite(buf, "Message Size", remainingSize, () -> buf.putInt(remainingSize));
+
+        // 2. Write the correlation ID to match the request.
+        int correlationId = kafkaRequest.getCorrelationId();
+        logWrite(buf, "Correlation ID", correlationId, () -> buf.putInt(correlationId));
+
+        logWrite(buf, "Tagged Buffer", 0, () -> writeUnsignedVarInt(0, buf));
+
+        // 3. Write the throttle time in milliseconds.
+        logWrite(buf, "Throttle Time", 0, () -> buf.putInt(0));
+
+        // 4. Write the topics array length using flexible format (VARINT).
+        logWrite(buf, "Topics Array Length", 2, () -> writeUnsignedVarInt(2, buf));
+
+        // 5. Write the error code for the topic.
+        logWrite(buf, "Error Code", UNKNOWN_TOPIC_OR_PARTITION_ERROR_CODE, () -> buf.putShort(UNKNOWN_TOPIC_OR_PARTITION_ERROR_CODE));
+
+        // ---- Start of Topic[0] Data (Order is critical) ----
+        // 6. Write the topic name.
+        logWrite(buf, "Topic Name", unknownTopicName, () -> writeString(buf, unknownTopicName, FLEXIBLE_VERSION_FLAG));
+
+        // 7. Write the topic ID (UUID).
+        logWrite(buf, "Topic ID", nullTopicId, () -> writeBytes(buf, nullTopicId));
+
+        // 8. Write the 'is_internal' flag (discovered from analysis).
+        logWrite(buf, "Is Internal Flag", (byte) 0, () -> buf.put((byte) 0));
+
+        // 9. Write the partitions array for this topic. It's empty.
+        logWrite(buf, "Partitions Array Length", 1, () -> writeUnsignedVarInt(1, buf));
+
+        // 10. Write the 'topic_authorized_operations' integer (discovered from analysis).
+        logWrite(buf, "Topic Auth Operations", 0, () -> buf.putInt(0));
+
+        // 11. Write the tagged fields for the topic.
+        logWrite(buf, "Topic Tagged Fields", 0, () -> writeUnsignedVarInt(0, buf));
+
+        buf.put((byte) 0xFF);
+        buf.put((byte) 0x00);
+
+        System.out.println("--- Response Building Complete ---\n");
+        return buf.array();
+    }
+
+    private byte[] getApiVersionResponse(KafkaRequest kafkaRequest) {
         byte[] clientIdBytes = kafkaRequest.getClientId() != null ? kafkaRequest.getClientId().getBytes(StandardCharsets.UTF_8) : new byte[0];
         int remainingSize = getRemainingSize(kafkaRequest);
         ByteBuffer buf = ByteBuffer.allocate( messageSize + remainingSize);
         writeMessageSize(buf, remainingSize);
         writeCorrelationId(buf, kafkaRequest.getCorrelationId());
         writeErrorCode(buf, kafkaRequest.getApiVersion());
-        writeApiVersionsArray(buf, kafkaRequest.getApiVersion());
+        writeApiVersionsArray(buf, kafkaRequest.getApiVersion(), kafkaRequest.getApiKey());
         return buf.array();
     }
 
     private int getRemainingSize(KafkaRequest kafkaRequest) {
         int remainingSize;
-        // Correctly calculate size based on the protocol version
         if (kafkaRequest.getApiVersion() >= 3) {
-            // Flexible version size calculation
             int arrayHeaderSize = sizeOfUnsignedVarInt(this.supportedApis.size() + 1);
             int taggedFieldsSize = sizeOfUnsignedVarInt(0);
-            remainingSize = correlationIdSize // Correlation ID
-                    + errorCodeSize // Error Code
-                    + throttleTimeMsSize // ThrottleTimeMs
-                    + arrayHeaderSize
-                    + (this.supportedApis.size() * 7) // Array Data 2 + 2 + 2 + 1 (apiKey + minVersion + maxVersion + taggedBuffer)
-                    + taggedFieldsSize;
+            remainingSize = correlationIdSize + errorCodeSize + throttleTimeMsSize + arrayHeaderSize
+                    + (this.supportedApis.size() * 7) + taggedFieldsSize;
         } else {
-            // Rigid version size calculation
-            remainingSize = correlationIdSize // Correlation ID
-                    + errorCodeSize // Error Code
-                    + INT_32_LENGTH // Array Length (int32)
-                    + (supportedApis.size() * 6); // Array Data
+            remainingSize = correlationIdSize + errorCodeSize + INT_32_LENGTH
+                    + (supportedApis.size() * 6);
         }
         return remainingSize;
     }
@@ -73,35 +142,26 @@ public class ResponseProcessor {
     public void writeToOutputStream(Socket clientSocket, byte[] res) throws IOException {
         OutputStream outputStream = clientSocket.getOutputStream();
         outputStream.write(res);
-        System.out.println(">>>>> Writing Outputc");
+        System.out.println(">>>>> Writing Output");
         outputStream.flush();
     }
 
-    private void writeApiVersionsArray(ByteBuffer buf, short reqApiVersion) {
-        // For flexible versions (v3+), write the length as a U_VARINT.
+    private void writeApiVersionsArray(ByteBuffer buf, short reqApiVersion, short apiKey) {
         if (reqApiVersion >= 3) {
-            writeUnsignedVarInt(supportedApis.size() + 1, buf); // Flexible arrays are length + 1
-        }
-        // For old, rigid versions, write the length as a 4-byte integer.
-        else {
+            writeUnsignedVarInt(supportedApis.size() + 1, buf);
+        } else {
             buf.putInt(supportedApis.size());
         }
-
         for (KafkaResponse.ApiVersionDTO api : supportedApis) {
             buf.putShort(api.getApiKey());
             buf.putShort(api.getMinVersion());
             buf.putShort(api.getMaxVersion());
-        }
-
-        // For flexible versions, you must also write the tagged fields count (0 in this case)
-        if (reqApiVersion >= 3) {
-            writeUnsignedVarInt(0, buf);
+            if (reqApiVersion >= 3) {
+                writeUnsignedVarInt(0, buf);
+            }
         }
     }
 
-    /**
-     * Writes an integer to the buffer as an Unsigned Varint.
-     */
     private static void writeUnsignedVarInt(int value, ByteBuffer buf) {
         while ((value & 0xFFFFFF80) != 0L) {
             byte b = (byte) ((value & 0x7F) | 0x80);
@@ -119,4 +179,92 @@ public class ResponseProcessor {
         }
         return bytes;
     }
+
+    private int getDescribeTopicPartitionsResponseSize(short apiVersion, String topicName) {
+        int size = 0;
+        size += correlationIdSize;
+        size += throttleTimeMsSize;
+        size += sizeOfUnsignedVarInt(0); // Response header tagged buffer
+        int specialFieldsSize = 1 + 4; // is_internal (byte) + topic_authorized_operations (int)
+        size += sizeOfUnsignedVarInt(2); // Topics array length
+        size += sizeOfString(topicName, apiVersion);
+        size += errorCodeSize;
+        size += 16; // Topic ID
+        size += specialFieldsSize;
+        size += sizeOfUnsignedVarInt(1); // Partitions array length
+        size += sizeOfUnsignedVarInt(0); // Topic tagged fields
+        size += sizeOfUnsignedVarInt(0); // Cursor
+        size += sizeOfUnsignedVarInt(0); // Top-level tagged fields
+        return size;
+    }
+
+    private void writeString(ByteBuffer buf, String s, short apiVersion) {
+        byte[] data = s.getBytes(StandardCharsets.UTF_8);
+        if (apiVersion >= 1) {
+            writeUnsignedVarInt(data.length + 1, buf);
+        } else {
+            buf.putShort((short) data.length);
+        }
+        buf.put(data);
+    }
+
+    private void writeBytes(ByteBuffer buf, byte[] bytes) {
+        buf.put(bytes);
+    }
+
+    private int sizeOfString(String s, short apiVersion) {
+        int stringLength = s.getBytes(StandardCharsets.UTF_8).length;
+        int lengthPrefixSize;
+        if (apiVersion >= 1) {
+            lengthPrefixSize = sizeOfUnsignedVarInt(stringLength + 1);
+        } else {
+            lengthPrefixSize = 2; // Rigid versions use a short (2 bytes)
+        }
+        return lengthPrefixSize + stringLength;
+    }
+
+    // =====================================================================================
+    // HELPER METHODS for Logging
+    // =====================================================================================
+
+    /**
+     * A helper to wrap a write operation, logging its details to the console.
+     * @param buf The buffer being written to.
+     * @param description A description of the field being written.
+     * @param value The original decimal value of the data.
+     * @param writer A lambda function that performs the actual write operation.
+     */
+    private void logWrite(ByteBuffer buf, String description, Object value, Runnable writer) {
+        int startPos = buf.position();
+        writer.run();
+        int endPos = buf.position();
+
+        byte[] writtenBytes = new byte[endPos - startPos];
+        buf.position(startPos); // Go back to read the bytes
+        buf.get(writtenBytes);
+        buf.position(endPos);   // Restore buffer position
+
+        String hexValue = bytesToHex(writtenBytes);
+        String valueStr = value.toString();
+        if (value instanceof byte[]) {
+            valueStr = "byte[" + ((byte[])value).length + "]"; // Don't print large byte arrays
+        }
+
+        System.out.println(String.format("  [WRITE] %-25s | pos: %-3d | hex: %-20s | dec: %s",
+                description, endPos, hexValue, valueStr));
+    }
+
+    /**
+     * Converts a byte array to a hexadecimal string representation.
+     * @param bytes The byte array to convert.
+     * @return A string of hex values.
+     */
+    private static String bytesToHex(byte[] bytes) {
+        StringBuilder sb = new StringBuilder();
+        for (byte b : bytes) {
+            sb.append(String.format("%02X ", b));
+        }
+        return sb.toString().trim();
+    }
 }
+
