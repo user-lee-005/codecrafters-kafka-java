@@ -8,7 +8,6 @@ import java.nio.charset.StandardCharsets;
 import java.text.MessageFormat;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Objects;
 
 public class RequestProcessor {
     public KafkaRequest processRequest(DataInputStream dataInputStream) throws IOException {

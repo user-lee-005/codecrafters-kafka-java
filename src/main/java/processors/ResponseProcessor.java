@@ -2,15 +2,16 @@ package processors;
 
 import dto.KafkaRequest;
 import dto.KafkaResponse;
+import dto.MetadataCache;
+import dto.PartitionData;
 
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
-import java.text.MessageFormat;
+import java.util.ArrayList;
 import java.util.List;
-import java.util.Optional;
 import java.util.UUID;
 
 import static utils.Constants.*;
@@ -18,12 +19,14 @@ import static utils.Constants.unsupportedVersionErrorCode;
 
 public class ResponseProcessor {
     private final List<KafkaResponse.ApiVersionDTO> supportedApis;
+    private final MetadataCache metadataCache;
 
     // A constant for the "unknown topic or partition" error code in Kafka.
     private static final short UNKNOWN_TOPIC_OR_PARTITION_ERROR_CODE = 3;
 
-    public ResponseProcessor(List<KafkaResponse.ApiVersionDTO> supportedApis) {
+    public ResponseProcessor(List<KafkaResponse.ApiVersionDTO> supportedApis, MetadataCache metadataCache) {
         this.supportedApis = supportedApis;
+        this.metadataCache = metadataCache;
     }
 
     public byte[] generateResponse(KafkaRequest kafkaRequest) {
@@ -45,11 +48,25 @@ public class ResponseProcessor {
      * @return A byte array representing the response.
      */
     private byte[] getDescribeTopicPartitionsResponse(KafkaRequest kafkaRequest) {
-        String unknownTopicName = kafkaRequest.getBody().getTopics().getFirst();
-        byte[] nullTopicId = new byte[16]; // A null UUID is 16 zero bytes.
+        String topicName = kafkaRequest.getBody().getTopics().getFirst();
+        List<PartitionData> partitionData = null;
+        if(metadataCache != null) partitionData = metadataCache.byName().get(topicName);
+        short errorCode;
+        String topicUuid;
+        short partitionArrayLength;
+
+        if(partitionData == null || partitionData.isEmpty()) {
+            topicUuid = null;
+            errorCode = UNKNOWN_TOPIC_OR_PARTITION_ERROR_CODE;
+            partitionArrayLength = 0;
+        } else {
+            errorCode = 0;
+            topicUuid = partitionData.getFirst().topicUuid();
+            partitionArrayLength = (short) (partitionData.size() + 1);
+        }
 
         final short FLEXIBLE_VERSION_FLAG = 3;
-        int remainingSize = getDescribeTopicPartitionsResponseSize(FLEXIBLE_VERSION_FLAG, unknownTopicName);
+        int remainingSize = getDescribeTopicPartitionsResponseSize(FLEXIBLE_VERSION_FLAG, topicName, partitionData);
         ByteBuffer buf = ByteBuffer.allocate(messageSize + remainingSize);
 
         System.out.println("\n--- Building DescribeTopicPartitions Response ---");
@@ -70,20 +87,49 @@ public class ResponseProcessor {
         logWrite(buf, "Topics Array Length", 2, () -> writeUnsignedVarInt(2, buf));
 
         // 5. Write the error code for the topic.
-        logWrite(buf, "Error Code", UNKNOWN_TOPIC_OR_PARTITION_ERROR_CODE, () -> buf.putShort(UNKNOWN_TOPIC_OR_PARTITION_ERROR_CODE));
+        logWrite(buf, "Error Code", errorCode, () -> buf.putShort(errorCode));
 
         // ---- Start of Topic[0] Data (Order is critical) ----
         // 6. Write the topic name.
-        logWrite(buf, "Topic Name", unknownTopicName, () -> writeString(buf, unknownTopicName, FLEXIBLE_VERSION_FLAG));
+        logWrite(buf, "Topic Name", topicName, () -> writeString(buf, topicName, FLEXIBLE_VERSION_FLAG));
 
         // 7. Write the topic ID (UUID).
-        logWrite(buf, "Topic ID", nullTopicId, () -> writeBytes(buf, nullTopicId));
+        logWrite(buf, "Topic ID", topicUuid, () -> writeBytes(buf, uuidToBytes(topicUuid)));
 
         // 8. Write the 'is_internal' flag (discovered from analysis).
         logWrite(buf, "Is Internal Flag", (byte) 0, () -> buf.put((byte) 0));
 
         // 9. Write the partitions array for this topic. It's empty.
-        logWrite(buf, "Partitions Array Length", 1, () -> writeUnsignedVarInt(1, buf));
+        logWrite(buf, "Partitions Array Length", partitionArrayLength, () -> writeUnsignedVarInt(partitionArrayLength, buf));
+
+        if(partitionArrayLength > 0) {
+            for(int i = 0; i < partitionArrayLength - 1; i ++) {
+                logWrite(buf, "Error Code", 0, () -> buf.putShort((short) 0));
+                int partitionIndex = i;
+                PartitionData ithPartitionData = partitionData.get(partitionIndex);
+                logWrite(buf, "Partition Index", partitionIndex, () -> buf.putInt(partitionIndex));
+                logWrite(buf, "Leader ID", ithPartitionData.leader(), () -> buf.putInt(ithPartitionData.leader()));
+                logWrite(buf, "Leader Epoch", ithPartitionData.leaderEpoch(), () -> buf.putInt(ithPartitionData.leaderEpoch()));
+                logWrite(buf, "Replica Nodes Array Length", ithPartitionData.replicas().size() + 1, () -> writeUnsignedVarInt(ithPartitionData.replicas().size() + 1, buf));
+                if(!ithPartitionData.replicas().isEmpty()) {
+                    for (int j = 0; j < ithPartitionData.replicas().size(); j ++) {
+                        int replica = ithPartitionData.replicas().get(j);
+                        logWrite(buf, "Replica Node", replica, () -> buf.putInt(replica));
+                    }
+                }
+                logWrite(buf, "In Sync Replica Nodes Array Length", ithPartitionData.inSyncReplicas().size() + 1, () -> writeUnsignedVarInt(ithPartitionData.replicas().size() + 1, buf));
+                if(!ithPartitionData.inSyncReplicas().isEmpty()) {
+                    for (int j = 0; j < ithPartitionData.inSyncReplicas().size(); j ++) {
+                        int replica = ithPartitionData.inSyncReplicas().get(j);
+                        logWrite(buf, "Replica Node", replica, () -> buf.putInt(replica));
+                    }
+                }
+                logWrite(buf, "Eligible Leader Replica Nodes Array Length", 1, () -> writeUnsignedVarInt(1, buf));
+                logWrite(buf, "Last Known ELR Array Length", 1, () -> writeUnsignedVarInt(1, buf));
+                logWrite(buf, "Offline Replica Nodes Array Length", 1, () -> writeUnsignedVarInt(1, buf));
+                logWrite(buf, "Topic Tagged Fields", 0, () -> writeUnsignedVarInt(0, buf));
+            }
+        }
 
         // 10. Write the 'topic_authorized_operations' integer (discovered from analysis).
         logWrite(buf, "Topic Auth Operations", 0, () -> buf.putInt(0));
@@ -180,21 +226,48 @@ public class ResponseProcessor {
         return bytes;
     }
 
-    private int getDescribeTopicPartitionsResponseSize(short apiVersion, String topicName) {
+    private int getDescribeTopicPartitionsResponseSize(
+            short apiVersion, String topicName, List<PartitionData> partitions) {
         int size = 0;
         size += correlationIdSize;
         size += throttleTimeMsSize;
         size += sizeOfUnsignedVarInt(0); // Response header tagged buffer
-        int specialFieldsSize = 1 + 4; // is_internal (byte) + topic_authorized_operations (int)
+
+        int specialFieldsSize = 1 + 4; // is_internal + topic_authorized_operations
         size += sizeOfUnsignedVarInt(2); // Topics array length
         size += sizeOfString(topicName, apiVersion);
         size += errorCodeSize;
         size += 16; // Topic ID
         size += specialFieldsSize;
-        size += sizeOfUnsignedVarInt(1); // Partitions array length
+
+        // --- Partitions ---
+        int partitionArrayLength = (partitions == null) ? 0 : partitions.size();
+        size += sizeOfUnsignedVarInt(partitionArrayLength);
+
+        if (partitionArrayLength > 0) {
+            for (PartitionData pd : partitions) {
+                size += errorCodeSize;
+                size += 4 + 4 + 4; // partitionIndex + leader + leaderEpoch
+
+                int replicasSize = pd.replicas() != null ? pd.replicas().size() : 0;
+                size += sizeOfUnsignedVarInt(replicasSize + 1);
+                size += 4 * replicasSize;
+
+                int isrSize = pd.inSyncReplicas() != null ? pd.inSyncReplicas().size() : 0;
+                size += sizeOfUnsignedVarInt(isrSize + 1);
+                size += 4 * isrSize;
+
+                size += sizeOfUnsignedVarInt(1); // ELR
+                size += sizeOfUnsignedVarInt(1); // Last Known ELR
+                size += sizeOfUnsignedVarInt(1); // Offline
+                size += sizeOfUnsignedVarInt(0); // tagged fields
+            }
+        }
+
         size += sizeOfUnsignedVarInt(0); // Topic tagged fields
         size += sizeOfUnsignedVarInt(0); // Cursor
         size += sizeOfUnsignedVarInt(0); // Top-level tagged fields
+
         return size;
     }
 
@@ -245,13 +318,16 @@ public class ResponseProcessor {
         buf.position(endPos);   // Restore buffer position
 
         String hexValue = bytesToHex(writtenBytes);
-        String valueStr = value.toString();
-        if (value instanceof byte[]) {
-            valueStr = "byte[" + ((byte[])value).length + "]"; // Don't print large byte arrays
+        String valueStr = "null";
+        if(value != null) {
+            valueStr = value.toString();
+            if (value instanceof byte[]) {
+                valueStr = "byte[" + ((byte[])value).length + "]"; // Don't print large byte arrays
+            }
         }
 
-        System.out.println(String.format("  [WRITE] %-25s | pos: %-3d | hex: %-20s | dec: %s",
-                description, endPos, hexValue, valueStr));
+        System.out.printf("[WRITE] %-25s | pos: %-3d | hex: %-20s | dec: %s%n",
+                description, endPos, hexValue, valueStr);
     }
 
     /**
@@ -266,5 +342,18 @@ public class ResponseProcessor {
         }
         return sb.toString().trim();
     }
+
+    private static byte[] uuidToBytes(String uuidString) {
+        if (uuidString == null) {
+            return new byte[16];
+        }
+
+        UUID uuid = UUID.fromString(uuidString);
+        ByteBuffer buffer = ByteBuffer.allocate(16);
+        buffer.putLong(uuid.getMostSignificantBits());
+        buffer.putLong(uuid.getLeastSignificantBits());
+        return buffer.array();
+    }
+
 }
 
