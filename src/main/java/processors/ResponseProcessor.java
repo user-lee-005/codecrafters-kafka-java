@@ -10,9 +10,7 @@ import java.io.OutputStream;
 import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.UUID;
+import java.util.*;
 
 import static utils.Constants.*;
 import static utils.Constants.unsupportedVersionErrorCode;
@@ -48,25 +46,17 @@ public class ResponseProcessor {
      * @return A byte array representing the response.
      */
     private byte[] getDescribeTopicPartitionsResponse(KafkaRequest kafkaRequest) {
-        String topicName = kafkaRequest.getBody().getTopics().getFirst();
-        List<PartitionData> partitionData = null;
-        if(metadataCache != null) partitionData = metadataCache.byName().get(topicName);
-        short errorCode;
-        String topicUuid;
-        short partitionArrayLength;
-
-        if(partitionData == null || partitionData.isEmpty()) {
-            topicUuid = null;
-            errorCode = UNKNOWN_TOPIC_OR_PARTITION_ERROR_CODE;
-            partitionArrayLength = 0;
-        } else {
-            errorCode = 0;
-            topicUuid = partitionData.getFirst().topicUuid();
-            partitionArrayLength = (short) (partitionData.size() + 1);
+        List<String> topics = kafkaRequest.getBody().getTopics().stream().sorted().toList();
+        Map<String, List<PartitionData>> topicPartitionsMap = new HashMap<>();
+        if (metadataCache != null) {
+            for (String topicName : topics) {
+                List<PartitionData> partitions = metadataCache.byName().get(topicName);
+                topicPartitionsMap.put(topicName, partitions != null ? partitions : Collections.emptyList());
+            }
         }
 
         final short FLEXIBLE_VERSION_FLAG = 3;
-        int remainingSize = getDescribeTopicPartitionsResponseSize(FLEXIBLE_VERSION_FLAG, topicName, partitionData);
+        int remainingSize = getDescribeTopicPartitionsResponseSize(FLEXIBLE_VERSION_FLAG, topics, topicPartitionsMap);
         ByteBuffer buf = ByteBuffer.allocate(messageSize + remainingSize);
 
         System.out.println("\n--- Building DescribeTopicPartitions Response ---");
@@ -84,59 +74,75 @@ public class ResponseProcessor {
         logWrite(buf, "Throttle Time", 0, () -> buf.putInt(0));
 
         // 4. Write the topics array length using flexible format (VARINT).
-        logWrite(buf, "Topics Array Length", 2, () -> writeUnsignedVarInt(2, buf));
+        logWrite(buf, "Topics Array Length", topics.size() + 1, () -> writeUnsignedVarInt(topics.size() + 1, buf));
 
-        // 5. Write the error code for the topic.
-        logWrite(buf, "Error Code", errorCode, () -> buf.putShort(errorCode));
-
-        // ---- Start of Topic[0] Data (Order is critical) ----
-        // 6. Write the topic name.
-        logWrite(buf, "Topic Name", topicName, () -> writeString(buf, topicName, FLEXIBLE_VERSION_FLAG));
-
-        // 7. Write the topic ID (UUID).
-        logWrite(buf, "Topic ID", topicUuid, () -> writeBytes(buf, uuidToBytes(topicUuid)));
-
-        // 8. Write the 'is_internal' flag (discovered from analysis).
-        logWrite(buf, "Is Internal Flag", (byte) 0, () -> buf.put((byte) 0));
-
-        // 9. Write the partitions array for this topic. It's empty.
-        logWrite(buf, "Partitions Array Length", partitionArrayLength, () -> writeUnsignedVarInt(partitionArrayLength, buf));
-
-        if(partitionArrayLength > 0) {
-            for(int i = 0; i < partitionArrayLength - 1; i ++) {
-                logWrite(buf, "Error Code", 0, () -> buf.putShort((short) 0));
-                int partitionIndex = i;
-                PartitionData ithPartitionData = partitionData.get(partitionIndex);
-                logWrite(buf, "Partition Index", partitionIndex, () -> buf.putInt(partitionIndex));
-                logWrite(buf, "Leader ID", ithPartitionData.leader(), () -> buf.putInt(ithPartitionData.leader()));
-                logWrite(buf, "Leader Epoch", ithPartitionData.leaderEpoch(), () -> buf.putInt(ithPartitionData.leaderEpoch()));
-                logWrite(buf, "Replica Nodes Array Length", ithPartitionData.replicas().size() + 1, () -> writeUnsignedVarInt(ithPartitionData.replicas().size() + 1, buf));
-                if(!ithPartitionData.replicas().isEmpty()) {
-                    for (int j = 0; j < ithPartitionData.replicas().size(); j ++) {
-                        int replica = ithPartitionData.replicas().get(j);
-                        logWrite(buf, "Replica Node", replica, () -> buf.putInt(replica));
-                    }
-                }
-                logWrite(buf, "In Sync Replica Nodes Array Length", ithPartitionData.inSyncReplicas().size() + 1, () -> writeUnsignedVarInt(ithPartitionData.replicas().size() + 1, buf));
-                if(!ithPartitionData.inSyncReplicas().isEmpty()) {
-                    for (int j = 0; j < ithPartitionData.inSyncReplicas().size(); j ++) {
-                        int replica = ithPartitionData.inSyncReplicas().get(j);
-                        logWrite(buf, "Replica Node", replica, () -> buf.putInt(replica));
-                    }
-                }
-                logWrite(buf, "Eligible Leader Replica Nodes Array Length", 1, () -> writeUnsignedVarInt(1, buf));
-                logWrite(buf, "Last Known ELR Array Length", 1, () -> writeUnsignedVarInt(1, buf));
-                logWrite(buf, "Offline Replica Nodes Array Length", 1, () -> writeUnsignedVarInt(1, buf));
-                logWrite(buf, "Topic Tagged Fields", 0, () -> writeUnsignedVarInt(0, buf));
+        for(String topicName: topics) {
+            short errorCode;
+            String topicUuid;
+            short partitionArrayLength;
+            List<PartitionData> partitionData = topicPartitionsMap.get(topicName);
+            if(partitionData == null || partitionData.isEmpty()) {
+                topicUuid = null;
+                errorCode = UNKNOWN_TOPIC_OR_PARTITION_ERROR_CODE;
+                partitionArrayLength = 0;
+            } else {
+                errorCode = 0;
+                topicUuid = partitionData.getFirst().topicUuid();
+                partitionArrayLength = (short) (partitionData.size() + 1);
             }
+
+            // 5. Write the error code for the topic.
+            logWrite(buf, "Error Code", errorCode, () -> buf.putShort(errorCode));
+
+            // ---- Start of Topic[0] Data (Order is critical) ----
+            // 6. Write the topic name.
+            logWrite(buf, "Topic Name", topicName, () -> writeString(buf, topicName, FLEXIBLE_VERSION_FLAG));
+
+            // 7. Write the topic ID (UUID).
+            logWrite(buf, "Topic ID", topicUuid, () -> writeBytes(buf, uuidToBytes(topicUuid)));
+
+            // 8. Write the 'is_internal' flag (discovered from analysis).
+            logWrite(buf, "Is Internal Flag", (byte) 0, () -> buf.put((byte) 0));
+
+            // 9. Write the partitions array for this topic. It's empty.
+            logWrite(buf, "Partitions Array Length", partitionArrayLength, () -> writeUnsignedVarInt(partitionArrayLength, buf));
+
+            if(partitionArrayLength > 0) {
+                for(int i = 0; i < partitionArrayLength - 1; i ++) {
+                    logWrite(buf, "Error Code", 0, () -> buf.putShort((short) 0));
+                    int partitionIndex = i;
+                    PartitionData ithPartitionData = partitionData.get(partitionIndex);
+                    logWrite(buf, "Partition Index", partitionIndex, () -> buf.putInt(partitionIndex));
+                    logWrite(buf, "Leader ID", ithPartitionData.leader(), () -> buf.putInt(ithPartitionData.leader()));
+                    logWrite(buf, "Leader Epoch", ithPartitionData.leaderEpoch(), () -> buf.putInt(ithPartitionData.leaderEpoch()));
+                    logWrite(buf, "Replica Nodes Array Length", ithPartitionData.replicas().size() + 1, () -> writeUnsignedVarInt(ithPartitionData.replicas().size() + 1, buf));
+                    if(!ithPartitionData.replicas().isEmpty()) {
+                        for (int j = 0; j < ithPartitionData.replicas().size(); j ++) {
+                            int replica = ithPartitionData.replicas().get(j);
+                            logWrite(buf, "Replica Node", replica, () -> buf.putInt(replica));
+                        }
+                    }
+                    logWrite(buf, "In Sync Replica Nodes Array Length", ithPartitionData.inSyncReplicas().size() + 1, () -> writeUnsignedVarInt(ithPartitionData.replicas().size() + 1, buf));
+                    if(!ithPartitionData.inSyncReplicas().isEmpty()) {
+                        for (int j = 0; j < ithPartitionData.inSyncReplicas().size(); j ++) {
+                            int replica = ithPartitionData.inSyncReplicas().get(j);
+                            logWrite(buf, "Replica Node", replica, () -> buf.putInt(replica));
+                        }
+                    }
+                    logWrite(buf, "Eligible Leader Replica Nodes Array Length", 1, () -> writeUnsignedVarInt(1, buf));
+                    logWrite(buf, "Last Known ELR Array Length", 1, () -> writeUnsignedVarInt(1, buf));
+                    logWrite(buf, "Offline Replica Nodes Array Length", 1, () -> writeUnsignedVarInt(1, buf));
+                    logWrite(buf, "Topic Tagged Fields", 0, () -> writeUnsignedVarInt(0, buf));
+                }
+            }
+
+            // 10. Write the 'topic_authorized_operations' integer (discovered from analysis).
+            logWrite(buf, "Topic Auth Operations", 0, () -> buf.putInt(0));
+
+            // 11. Write the tagged fields for the topic.
+            logWrite(buf, "Topic Tagged Fields", 0, () -> writeUnsignedVarInt(0, buf));
+
         }
-
-        // 10. Write the 'topic_authorized_operations' integer (discovered from analysis).
-        logWrite(buf, "Topic Auth Operations", 0, () -> buf.putInt(0));
-
-        // 11. Write the tagged fields for the topic.
-        logWrite(buf, "Topic Tagged Fields", 0, () -> writeUnsignedVarInt(0, buf));
-
         buf.put((byte) 0xFF);
         buf.put((byte) 0x00);
 
@@ -227,47 +233,48 @@ public class ResponseProcessor {
     }
 
     private int getDescribeTopicPartitionsResponseSize(
-            short apiVersion, String topicName, List<PartitionData> partitions) {
+            short apiVersion, List<String> topics, Map<String, List<PartitionData>> partitionsMap) {
         int size = 0;
         size += correlationIdSize;
         size += throttleTimeMsSize;
         size += sizeOfUnsignedVarInt(0); // Response header tagged buffer
 
         int specialFieldsSize = 1 + 4; // is_internal + topic_authorized_operations
-        size += sizeOfUnsignedVarInt(2); // Topics array length
-        size += sizeOfString(topicName, apiVersion);
-        size += errorCodeSize;
-        size += 16; // Topic ID
-        size += specialFieldsSize;
+        size += sizeOfUnsignedVarInt(topics.size()); // Topics array length
+        for(String topicName: topics) {
+            size += sizeOfString(topicName, apiVersion);
+            size += errorCodeSize;
+            size += 16; // Topic ID
+            size += specialFieldsSize;
 
-        // --- Partitions ---
-        int partitionArrayLength = (partitions == null) ? 0 : partitions.size();
-        size += sizeOfUnsignedVarInt(partitionArrayLength);
+            // --- Partitions ---
+            List<PartitionData> partitions = partitionsMap.get(topicName);
+            int partitionArrayLength = (partitions == null) ? 0 : partitions.size();
+            size += sizeOfUnsignedVarInt(partitionArrayLength);
 
-        if (partitionArrayLength > 0) {
-            for (PartitionData pd : partitions) {
-                size += errorCodeSize;
-                size += 4 + 4 + 4; // partitionIndex + leader + leaderEpoch
+            if (partitionArrayLength > 0) {
+                for (PartitionData pd : partitions) {
+                    size += errorCodeSize;
+                    size += 4 + 4 + 4; // partitionIndex + leader + leaderEpoch
 
-                int replicasSize = pd.replicas() != null ? pd.replicas().size() : 0;
-                size += sizeOfUnsignedVarInt(replicasSize + 1);
-                size += 4 * replicasSize;
+                    int replicasSize = pd.replicas() != null ? pd.replicas().size() : 0;
+                    size += sizeOfUnsignedVarInt(replicasSize + 1);
+                    size += 4 * replicasSize;
 
-                int isrSize = pd.inSyncReplicas() != null ? pd.inSyncReplicas().size() : 0;
-                size += sizeOfUnsignedVarInt(isrSize + 1);
-                size += 4 * isrSize;
+                    int isrSize = pd.inSyncReplicas() != null ? pd.inSyncReplicas().size() : 0;
+                    size += sizeOfUnsignedVarInt(isrSize + 1);
+                    size += 4 * isrSize;
 
-                size += sizeOfUnsignedVarInt(1); // ELR
-                size += sizeOfUnsignedVarInt(1); // Last Known ELR
-                size += sizeOfUnsignedVarInt(1); // Offline
-                size += sizeOfUnsignedVarInt(0); // tagged fields
+                    size += sizeOfUnsignedVarInt(1); // ELR
+                    size += sizeOfUnsignedVarInt(1); // Last Known ELR
+                    size += sizeOfUnsignedVarInt(1); // Offline
+                    size += sizeOfUnsignedVarInt(0); // tagged fields
+                }
             }
+            size += sizeOfUnsignedVarInt(0); // Topic tagged fields
         }
-
-        size += sizeOfUnsignedVarInt(0); // Topic tagged fields
         size += sizeOfUnsignedVarInt(0); // Cursor
         size += sizeOfUnsignedVarInt(0); // Top-level tagged fields
-
         return size;
     }
 

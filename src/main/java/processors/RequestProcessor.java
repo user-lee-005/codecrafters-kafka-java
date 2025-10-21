@@ -63,7 +63,6 @@ public class RequestProcessor {
         int topicsArrayLength = dataInputStream.readByte();
         bytesConsumed += 1;
 
-
         List<String> topics = new ArrayList<>();
         for (int i = 0; i < topicsArrayLength - 1; i++) {
             int topicNameLength = dataInputStream.readByte();
