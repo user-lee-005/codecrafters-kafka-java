@@ -19,7 +19,7 @@ import java.util.concurrent.Executors;
 public class Main {
   static final List<KafkaResponse.ApiVersionDTO> supportedApis = List.of(
           new KafkaResponse.ApiVersionDTO((short)18, (short)0, (short)4),    // ApiVersions
-          new KafkaResponse.ApiVersionDTO((short)1, (short)0, (short)16),    // Fetch
+          new KafkaResponse.ApiVersionDTO((short)1, (short)4, (short)16),    // Fetch
           new KafkaResponse.ApiVersionDTO((short)75, (short)0, (short)0)    // DescribeTopicPartitions
   );
 

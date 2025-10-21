@@ -29,11 +29,36 @@ public class ResponseProcessor {
 
     public byte[] generateResponse(KafkaRequest kafkaRequest) {
         return switch (kafkaRequest.getApiKey()) {
-            case 1, 18 -> getApiVersionResponse(kafkaRequest);
+            case 18 -> getApiVersionResponse(kafkaRequest);
             case 75 -> getDescribeTopicPartitionsResponse(kafkaRequest);
+            case 1 -> getFetchResponse(kafkaRequest);
             default ->
                     throw new UnsupportedOperationException("API Key " + kafkaRequest.getApiKey() + " not implemented yet");
         };
+    }
+
+    private byte[] getFetchResponse(KafkaRequest kafkaRequest) {
+        int fetchResponseSize = getFetchResponseSize();
+        ByteBuffer buf = ByteBuffer.allocate(messageSize + fetchResponseSize);
+        writeMessageSize(buf, fetchResponseSize);
+        writeCorrelationId(buf, kafkaRequest.getCorrelationId());
+        logWrite(buf, "Tagged Buffer", 0, () -> writeUnsignedVarInt(0, buf));
+        logWrite(buf, "Throttle Time ms", 0, () -> buf.putInt(0));
+        logWrite(buf, "Error Code", 0, () -> buf.putShort((short) 0));
+        logWrite(buf, "Session ID", 0, () -> buf.putInt(0));
+        logWrite(buf, "Response Length", 0, () -> writeUnsignedVarInt(1, buf));
+        return buf.array();
+    }
+
+    private int getFetchResponseSize() {
+        int size = 0;
+        size += throttleTimeMsSize;
+        size += errorCodeSize;
+        size += correlationIdSize;
+        size += 4; // Session ID size
+        size += 1; // Response length
+        size += 1; // Tagged Buffer Header
+        return size;
     }
 
     /**
