@@ -29,7 +29,7 @@ public class ResponseProcessor {
 
     public byte[] generateResponse(KafkaRequest kafkaRequest) {
         return switch (kafkaRequest.getApiKey()) {
-            case 18 -> getApiVersionResponse(kafkaRequest);
+            case 1, 18 -> getApiVersionResponse(kafkaRequest);
             case 75 -> getDescribeTopicPartitionsResponse(kafkaRequest);
             default ->
                     throw new UnsupportedOperationException("API Key " + kafkaRequest.getApiKey() + " not implemented yet");
